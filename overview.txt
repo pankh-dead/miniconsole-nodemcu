@@ -1,0 +1,76 @@
+this project dates on 16-10-2025.
+*this project is made by a newbie.
+
+
+this is the code for a 12th standard science project
+of a "miniconsole" using a 1.8 inch TFT colour display
+along with a joystick and a mpu6050 tilt sensor to make 
+a mobile device.
+this project had multiple stupid decisions involved yet 
+does work.
+excess and unusable components such as an speaker amplifier
+and a unsuitable battery were used making it so that 
+the device is very bad at doing most of the things it is 
+supposed to.
+
+
+component list-
+• Slide switch.
+• Li-Po cell (3.7v 1800mah)
+• TP4056 Charging Module(blue colour type-c)
+• 5V Voltage Regulator Module(with on 1000μF capacitor,
+green colour small)
+• ST7735-s Display Module (resolution:128x160) 1.8 inch
+• PAM8403 Audio Amplifier Module(green colour)
+• 2x 2W laptop speakers
+• CD4051 Multiplexer Module(with a 100μF capacitor)
+• NodeMCU Microcontroller Development Board(SoC
+ESP8266 with integrated Wi-Fi, black colour, with 100μF
+capacitor)
+• Joystick Module
+• MPU6050 accelerometer gyro 3 axis sensor(blue colour,
+attached on the right side behind the VeroBoard)
+• Veroboard (green colour connection board used to make
+circuits)
+• 470 ohm resistor (between NodeMCU audio output and
+amplifier audio input)
+• 3 Million kilometers of connection wires, jk.
+
+Other Connections-
+• both speakers on the same audio amplifier output
+• battery to switch to charging module’s battery input
+• charging module output to 5V voltage regulator module.
+• Regulator module output to amplifier, multiplexer, joystick,
+display and NodeMCU power inputs.(means Vo of regulator
+to every where where it says Vcc or VIN or 5v on the board.
+• Sensor power is from NodeMCU 3V and GND pins.
+• All capacitors in parallel to outputs and inputs of regulator
+module, multiplexer and NodeMCU.
+
+| NodeMCU Pin | Function      | Connected To          | Notes                           |
+| ----------- | ------------- | --------------------- | ------------------------------- |
+| VIN         | 5 V input     | 5 V Bus               | Powers NodeMCU                  |
+| GND         | Ground        | Common GND            | —                               |
+| D5          | SPI CLK       | ST7735 CLK            | SPI clock                       |
+| D7          | SPI MOSI      | ST7735 DIN            | Data in                         |
+| D8          | SPI CS        | ST7735 CS             | Chip select                     |
+| D2          | DC            | ST7735 DC             | Data/Command                    |
+| D1          | RST           | ST7735 RST            | Hardware reset                  |
+| A0          | ADC input     | CD4051 Z (Common)     | Reads multiplexed joystick axes |
+| D0          | S0            | CD4051 channel select | Choose joystick channel         |
+| D3          | Joystick SW   | Button                | INPUT_PULLUP                    |
+| D4          | MPU6050 SDA   | I²C data              | —                               |
+| D6          | MPU6050 SCL   | I²C clock             | —                               |
+| TX          | Amplifier IN+ | Audio output          | Via 470 Ω resistor              |
+
+from the given code in "main.cpp" file, replace the wifi and password
+as well as the other user details with the one that are wanted by the user.
+
+..................................................
+
+the device projects its own website on the local network-
+
+http://miniconsole.local/
+
+most of the code for this was written using AI LLMs and AI Agents.
+while some minor iterations were made directly.
