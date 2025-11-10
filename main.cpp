@@ -17,16 +17,27 @@
 #endif
 
 // ---------------- USER SETTINGS ----------------
-#define WIFI_SSID    "WIFI_SSID"
-#define WIFI_PASS    "WIFI_PSWD"
+#define WIFI_SSID    "WiFi_SSID"
+#define WIFI_PASS    "WiFi_PASSWORD"
 #define DEVICE_NAME  "miniconsole"
 #define OPENWEATHER_API_KEY  "api_key"
 #define OPENWEATHER_CITY_ID  "city_id"
 
+// Known networks you can populate here with SSID and password pairs.
+// The user said they will put credentials in the code — add them in this array.
+struct KnownNet { const char* ssid; const char* pass; };
+KnownNet knownNets[] = {
+  { WIFI_SSID, WIFI_PASS },      // primary (already defined above)
+  // Example additional known network (edit or add as you like):
+  // { "", "" },
+   //{ "", "" },
+};
+const int KNOWN_NET_COUNT = sizeof(knownNets) / sizeof(knownNets[0]);
+
 uint16_t joystick_rotation = 90;
-uint8_t joystick_speed = 1; // Increased for faster cursor
+uint8_t joystick_speed = 2; // Increased for faster cursor
 uint8_t speaker_volume = 0;
-uint8_t target_fps = 60; // Increased for smoother games
+uint8_t target_fps = 30; // Increased for smoother games
 // -----------------------------------------------
 
 #define CALIB_SAMPLES 500
@@ -45,7 +56,7 @@ uint8_t target_fps = 60; // Increased for smoother games
 #define MPU_SCL   D6
 #define SPEAKER_PIN 1
 
-// Display - 15MHz SPI
+// Display - 8mhz SPI
 const uint16_t DISP_W = 160;
 const uint16_t DISP_H = 128;
 const uint8_t STATUS_BAR_H = 10;
@@ -80,6 +91,7 @@ struct CalibrationData {
 // Globals
 Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_RST);
 ESP8266WebServer server(80);
+bool webServerRunning = false; // <-- track server state (fixes server.started() error)
 
 enum AppState { APP_HOME, APP_LAUNCHER, APP_CALCULATOR, APP_COMPASS, APP_ACCEL, APP_CLOCK, APP_GAMES, APP_TICTACTOE, APP_PONG, APP_SPACESHOOTER, APP_SETTINGS };
 AppState currentApp = APP_HOME;
@@ -211,6 +223,7 @@ void redrawScreen();
 void saveCursorBackground();
 void restoreCursorBackground();
 void drawCursor(int x, int y);
+void autoConnectToBest();
 
 static inline int iMax(int a,int b){ return (a>b)?a:b; }
 static inline int iMin(int a,int b){ return (a<b)?a:b; }
@@ -669,10 +682,10 @@ void drawCompass() {
   tft.drawCircle(cx, cy, radius-2, C_PANEL);
 
   tft.setTextSize(1); tft.setTextColor(C_FG);
-  tft.setCursor(cx - 6, cy - radius - 8); tft.print("N");
-  tft.setCursor(cx - 6, cy + radius + 2); tft.print("S");
-  tft.setCursor(cx + radius + 2, cy - 4); tft.print("E");
-  tft.setCursor(cx - radius - 8, cy - 4); tft.print("W");
+  tft.setCursor(cx - 6, cy - radius - 8); tft.print("");
+  tft.setCursor(cx - 6, cy + radius + 2); tft.print("");
+  tft.setCursor(cx + radius + 2, cy - 4); tft.print("");
+  tft.setCursor(cx - radius - 8, cy - 4); tft.print("");
 
   for (int a=0;a<360;a+=30) {
     float ar = a * PI / 180.0;
@@ -1087,40 +1100,202 @@ void updateSpaceShooter() {
   }
 }
 
-void drawSettings() {
-  tft.fillRect(0,STATUS_BAR_H,DISP_W,DISP_H-STATUS_BAR_H,C_BG);
-  tft.setTextSize(1); tft.setTextColor(C_FG); 
-  tft.setCursor(10, STATUS_BAR_H+10); tft.print("Settings");
-  tft.setCursor(10, STATUS_BAR_H+26); tft.print("WiFi Networks:");
-  if (wifiScanDone == 0) { 
-    tft.setCursor(10, STATUS_BAR_H+44); tft.print("Scanning..."); 
-  } else {
-    String currentSSID = WiFi.SSID();
-    for (int i=0;i<min(wifiNetCount,4);i++) {
-      int y = STATUS_BAR_H + 44 + i*18;
-      bool connected = (wifiNets[i].ssid == currentSSID);
-      if (connected) tft.fillRoundRect(8, y, DISP_W-16, 16, 3, C_SELECTED);
-      tft.setTextColor(connected?C_BG:C_FG); 
-      tft.setCursor(12, y+3); tft.print(wifiNets[i].ssid);
-      tft.setCursor(DISP_W-34, y+3); tft.print(wifiNets[i].rssi);
-    }
+// ---------------- WIFI UTILS ----------------
+
+// Helper: find known password for SSID. Returns nullptr if not known.
+const char* findKnownPassword(const String &ssid) {
+  for (int i = 0; i < KNOWN_NET_COUNT; i++) {
+    if (ssid.equals(String(knownNets[i].ssid))) return knownNets[i].pass;
   }
-  tft.setTextColor(C_FG); tft.setCursor(10, DISP_H-10); 
-  tft.print("Press to rescan");
+  return nullptr;
 }
 
+// Sort scanned networks by RSSI (descending) and populate wifiNets[]
+void sortAndStoreScanResults(int n) {
+  // temporary arrays
+  String ssids[32];
+  int rssis[32];
+  int enc[32];
+  int useCount = min(n, 16);
+  for (int i = 0; i < n && i < 32; i++) {
+    ssids[i] = WiFi.SSID(i);
+    rssis[i] = WiFi.RSSI(i);
+    enc[i] = WiFi.encryptionType(i);
+  }
+  // simple selection sort to pick top networks by RSSI
+  bool used[32] = {0};
+  wifiNetCount = 0;
+  for (int k = 0; k < useCount; k++) {
+    int bestIdx = -1; int bestRssi = -9999;
+    for (int i = 0; i < n && i < 32; i++) {
+      if (used[i]) continue;
+      if (ssids[i].length() == 0) { used[i] = true; continue; }
+      if (rssis[i] > bestRssi) { bestRssi = rssis[i]; bestIdx = i; }
+    }
+    if (bestIdx < 0) break;
+    used[bestIdx] = true;
+    wifiNets[wifiNetCount].ssid = ssids[bestIdx];
+    wifiNets[wifiNetCount].rssi = rssis[bestIdx];
+    wifiNets[wifiNetCount].open = (enc[bestIdx] == ENC_TYPE_NONE);
+    wifiNetCount++;
+    if (wifiNetCount >= 16) break;
+  }
+}
+
+// Scan and store networks (UI-friendly)
 void scanWiFi() {
   wifiScanDone = 0; needsFullRedraw = true;
-  int n = WiFi.scanNetworks(); 
-  wifiNetCount = min(n, 16);
-  for (int i=0;i<wifiNetCount;i++) { 
-    wifiNets[i].ssid = WiFi.SSID(i); 
-    wifiNets[i].rssi = WiFi.RSSI(i); 
-    wifiNets[i].open = (WiFi.encryptionType(i) == ENC_TYPE_NONE); 
+  tft.setCursor(8, 106); tft.setTextColor(C_FG); tft.print("Scanning WiFi...");
+  int n = WiFi.scanNetworks(true, true); // try async first (if supported)
+  if (n == -1) {
+    // fallback blocking scan
+    n = WiFi.scanNetworks();
   }
+  sortAndStoreScanResults(n);
   wifiScanDone = 1; needsFullRedraw = true;
 }
 
+// Attempt to auto-connect: prefer known networks (matching SSID), otherwise try open networks.
+// Scans environment, sorts by signal, and tries connect in order. Updates TFT with status and highlights connected.
+void autoConnectToBest() {
+  tft.fillRect(0, STATUS_BAR_H, DISP_W, DISP_H-STATUS_BAR_H, C_BG);
+  tft.setTextSize(1); tft.setTextColor(C_FG);
+  tft.setCursor(8, STATUS_BAR_H + 20); tft.print("Auto-connecting to best network...");
+  tft.setCursor(8, STATUS_BAR_H + 36); tft.print("Scanning...");
+  needsFullRedraw = true;
+
+  int n = WiFi.scanNetworks();
+  if (n <= 0) {
+    tft.setCursor(8, STATUS_BAR_H + 52); tft.setTextColor(C_ERROR); tft.print("No networks found");
+    delay(1200);
+    scanWiFi();
+    return;
+  }
+
+  // Prepare sorted list and attempt in order:
+  sortAndStoreScanResults(n);
+
+  // First try known networks that are present
+  bool connected = false;
+  String connectedSSID = "";
+
+  for (int i = 0; i < wifiNetCount; i++) {
+    String s = wifiNets[i].ssid;
+    const char* pw = findKnownPassword(s);
+    if (pw != nullptr && strlen(pw) > 0) {
+      tft.setCursor(8, STATUS_BAR_H + 52 + (i*10)); tft.setTextColor(C_FG);
+      tft.printf("Trying known: %s", s.c_str());
+      WiFi.mode(WIFI_STA);
+      WiFi.begin(s.c_str(), pw);
+      uint32_t t0 = millis();
+      while (WiFi.status() != WL_CONNECTED && millis() - t0 < 8000) { delay(50); yield(); }
+      if (WiFi.status() == WL_CONNECTED) {
+        connected = true; connectedSSID = s; break;
+      }
+    }
+  }
+
+  // If not connected, try open networks (strongest first)
+  if (!connected) {
+    for (int i = 0; i < wifiNetCount; i++) {
+      if (wifiNets[i].open) {
+        String s = wifiNets[i].ssid;
+        tft.setCursor(8, STATUS_BAR_H + 52 + (i*10)); tft.setTextColor(C_FG);
+        tft.printf("Trying open: %s", s.c_str());
+        WiFi.mode(WIFI_STA);
+        WiFi.begin(s.c_str());
+        uint32_t t0 = millis();
+        while (WiFi.status() != WL_CONNECTED && millis() - t0 < 6000) { delay(50); yield(); }
+        if (WiFi.status() == WL_CONNECTED) {
+          connected = true; connectedSSID = s; break;
+        }
+      }
+    }
+  }
+
+  if (connected) {
+    tft.fillRect(8, STATUS_BAR_H + 52, DISP_W-16, 30, C_BG);
+    tft.setCursor(8, STATUS_BAR_H + 52); tft.setTextColor(C_SUCCESS);
+    tft.printf("Connected: %s", connectedSSID.c_str());
+    Serial.printf("Auto-connected to: %s\n", connectedSSID.c_str());
+    // update MDNS & server if needed
+    if (MDNS.begin(DEVICE_NAME)) MDNS.addService("http","tcp",80);
+    if (!webServerRunning) {
+      server.on("/", handleRoot);
+      server.on("/api", handleAPI);
+      server.on("/beep", handleBeep);
+      server.on("/message", handleMessage);
+      server.begin();
+      webServerRunning = true;
+    }
+  } else {
+    tft.fillRect(8, STATUS_BAR_H + 52, DISP_W-16, 30, C_BG);
+    tft.setCursor(8, STATUS_BAR_H + 52); tft.setTextColor(C_ERROR); tft.print("Auto-connect failed");
+    Serial.println("Auto-connect: failed to find/connect");
+  }
+
+  // Refresh scan results (so UI shows networks and highlights connected)
+  scanWiFi();
+  needsFullRedraw = true;
+  delay(800);
+}
+
+// Existing connectToWiFi: attempt known networks first, then open networks
+void connectToWiFi() {
+  tft.setCursor(8,106); tft.setTextColor(C_FG); tft.print("Connecting WiFi...");
+  WiFi.mode(WIFI_STA);
+
+  // Try known networks (from knownNets array) first
+  bool connected = false;
+  for (int i = 0; i < KNOWN_NET_COUNT; i++) {
+    const char* ssid = knownNets[i].ssid;
+    const char* pass = knownNets[i].pass;
+    if (ssid == nullptr || strlen(ssid) == 0) continue;
+    Serial.printf("Trying known network: %s\n", ssid);
+    tft.setCursor(8, 106); tft.print("Trying: "); tft.print(ssid);
+    WiFi.begin(ssid, pass);
+    uint32_t st = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - st < 7000) {
+      delay(100);
+      yield();
+    }
+    if (WiFi.status() == WL_CONNECTED) {
+      connected = true;
+      tft.setCursor(8, 106); tft.print("WiFi OK (known)  ");
+      Serial.printf("WiFi connected (known): %s\n", WiFi.SSID().c_str());
+      break;
+    }
+  }
+
+  // If still not connected, try open networks from a scan
+  if (!connected) {
+    Serial.println("Primary known networks failed. Scanning for open networks...");
+    tft.setCursor(8,106); tft.print("Scanning for open...");
+    int n = WiFi.scanNetworks();
+    sortAndStoreScanResults(n);
+    for (int i=0;i<wifiNetCount;i++) {
+      if (wifiNets[i].open) {
+        tft.setCursor(8, 106); tft.print("Trying open: "); tft.print(wifiNets[i].ssid);
+        WiFi.begin(wifiNets[i].ssid.c_str());
+        uint32_t t0 = millis();
+        while (WiFi.status() != WL_CONNECTED && millis() - t0 < 8000) { 
+          delay(50); yield(); 
+        }
+        if (WiFi.status() == WL_CONNECTED) {
+          connected = true;
+          tft.setCursor(8, 106); tft.print("WiFi OK (Open)  ");
+          Serial.printf("WiFi connected (open): %s\n", WiFi.SSID().c_str());
+          break;
+        }
+      }
+    }
+    if (!connected) {
+      tft.setCursor(8, 106); tft.setTextColor(C_ERROR); tft.print("WiFi Failed     ");
+    }
+  }
+}
+
+// ---------------- WEB UI ----------------
 void drawWebMessage() {
   int boxW = 140, boxH = 50;
   int boxX = (DISP_W - boxW) / 2;
@@ -1218,7 +1393,7 @@ void showBootScreen() {
   tft.setTextSize(2); tft.setTextColor(C_ACCENT); 
   tft.setCursor(8,12); tft.print("MiniConsole");
   tft.setTextSize(1); tft.setTextColor(C_FG); 
-  tft.setCursor(8,40); tft.print("Enhanced v2");
+  tft.setCursor(8,40); tft.print("Enhanced v58");
   int bw = DISP_W - 40; int bx = 20, by = 70;
   tft.drawRect(bx, by, bw, 12, C_FG);
   for (int p=0;p<=bw;p+=4) {
@@ -1228,107 +1403,52 @@ void showBootScreen() {
   tft.setCursor(8,100); tft.print("Ready");
 }
 
-void connectToWiFi() {
-  tft.setCursor(8,106); tft.setTextColor(C_FG); tft.print("Connecting WiFi...");
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
-  uint32_t st = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - st < 10000) {
-    delay(100);
-    yield();
-  }
-
-  if (WiFi.status() == WL_CONNECTED) {
-    tft.setCursor(8, 106); tft.print("WiFi OK         ");
-    Serial.printf("WiFi connected: %s\n", WiFi.SSID().c_str());
+// ---------------- UI: Settings with Auto-connect button ----------------
+void drawSettings() {
+  tft.fillRect(0,STATUS_BAR_H,DISP_W,DISP_H-STATUS_BAR_H,C_BG);
+  tft.setTextSize(1); tft.setTextColor(C_FG); 
+  tft.setCursor(10, STATUS_BAR_H+10); tft.print("Settings");
+  tft.setCursor(10, STATUS_BAR_H+26); tft.print("WiFi Networks:");
+  if (wifiScanDone == 0) { 
+    tft.setCursor(10, STATUS_BAR_H+44); tft.print("Scanning..."); 
   } else {
-    Serial.println("Primary WiFi failed. Trying open networks...");
-    int n = WiFi.scanNetworks();
-    bool connected = false;
-    for (int i=0;i<n;i++) {
-      if (WiFi.encryptionType(i) == ENC_TYPE_NONE) {
-        WiFi.begin(WiFi.SSID(i));
-        uint32_t t0 = millis();
-        while (WiFi.status() != WL_CONNECTED && millis() - t0 < 8000) { 
-          delay(50); yield(); 
-        }
-        if (WiFi.status() == WL_CONNECTED) {
-          connected = true;
-          tft.setCursor(8, 106); tft.print("WiFi OK (Open)  ");
-          break;
-        }
+    String currentSSID = WiFi.SSID();
+    int displayCount = min(wifiNetCount,6);
+    for (int i=0;i<displayCount;i++) {
+      int y = STATUS_BAR_H + 44 + i*16;
+      bool connected = (wifiNets[i].ssid == currentSSID && WiFi.status() == WL_CONNECTED);
+      if (connected) {
+        tft.fillRoundRect(8, y, DISP_W-16, 14, 3, C_SELECTED);
+      } else {
+        tft.fillRoundRect(8, y, DISP_W-16, 14, 3, C_PANEL);
       }
+      tft.setTextColor(connected?C_BG:C_FG); 
+      tft.setCursor(12, y+3); tft.print(wifiNets[i].ssid);
+      tft.setCursor(DISP_W-44, y+3); 
+      tft.setTextColor(connected?C_BG:C_FG);
+      tft.print(wifiNets[i].rssi);
+      if (wifiNets[i].open) { tft.setCursor(DISP_W-28, y+3); tft.print("O"); }
     }
-    if (!connected) tft.setCursor(8, 106); tft.setTextColor(C_ERROR); tft.print("WiFi Failed");
   }
+
+  // Auto-connect button (bottom-right)
+  int bx = DISP_W - 96;
+  int by = DISP_H - 22;
+  int bw = 88;
+  int bh = 16;
+  tft.fillRoundRect(bx, by, bw, bh, 3, C_PANEL);
+  tft.drawRoundRect(bx, by, bw, bh, 3, C_ACCENT);
+  tft.setCursor(bx + 10, by + 4); tft.setTextColor(C_FG); tft.print("Auto-connect");
+
+  // Rescan hint (bottom-left)
+  tft.setTextColor(C_FG); tft.setCursor(10, DISP_H-10); 
+  tft.print("Press to rescan");
 }
 
-void setup() {
-  Serial.begin(115200);
-  Serial.println("\n=== MiniConsole Enhanced v2 ===");
+// ---------------- REDRAW & UI ----------------
+void drawWebMessage(); // declared above
 
-  pinMode(MUX_S0, OUTPUT);
-  pinMode(JOY_SW, INPUT_PULLUP);
-  pinMode(SPEAKER_PIN, OUTPUT);
-  digitalWrite(SPEAKER_PIN, LOW);
-
-  // Initialize SPI at 15MHz for display
-  SPI.begin();
-  SPI.setFrequency(15000000);
-  
-  tft.initR(INITR_BLACKTAB);
-  tft.setRotation(1);
-  showBootScreen();
-  Serial.println("TFT initialized (15MHz SPI)");
-
-  Wire.begin(MPU_SDA, MPU_SCL);
-  Wire.setClock(400000); // Fast I2C
-  Wire.beginTransmission((uint8_t)MPU_ADDR);
-  Wire.write(0x6B);
-  Wire.write(0);
-  Wire.endTransmission();
-  Serial.println("MPU initialized");
-
-  EEPROM.begin(EEPROM_SIZE);
-  if (loadCalibration()) {
-    calibrated = true;
-    tft.setCursor(8,110); tft.setTextColor(C_FG); 
-    tft.print("Calibration loaded");
-  }
-
-  long sumX=0, sumY=0;
-  for (int i=0;i<50;i++) { sumX += readMux(0); sumY += readMux(1); delay(15); }
-  centerX = (int)(sumX / 50); centerY = (int)(sumY / 50);
-
-  connectToWiFi();
-
-  if (WiFi.status() == WL_CONNECTED) {
-    syncNTP();
-    delay(500);
-    fetchWeather();
-    weatherLastFetch = millis();
-    
-    if (MDNS.begin(DEVICE_NAME)) MDNS.addService("http","tcp",80);
-    server.on("/", handleRoot);
-    server.on("/api", handleAPI);
-    server.on("/beep", handleBeep);
-    server.on("/message", handleMessage);
-    server.begin();
-    Serial.println("Web server at miniconsole.local");
-  }
-
-  playClick();
-  delay(200);
-  
-  for (int i=0;i<9;i++) tttBoard[i]=0;
-  for (int i=0;i<8;i++) bullets[i].active = false;
-  for (int i=0;i<10;i++) enemies[i].active = false;
-
-  needsFullRedraw = true;
-  timerMicros = micros();
-  Serial.println("Setup complete");
-}
-
+// ---------------- INPUT HANDLERS ----------------
 void handleCalcPress(int px,int py) {
   int btnW = 32, btnH = 16, gap = 3, startX = 10, startY = STATUS_BAR_H + 32;
   const char* labels[] = {"7","8","9","/","4","5","6","*","1","2","3","-","0",".","=","+"};
@@ -1436,6 +1556,80 @@ void mapJoystickToMovement(int rawXv,int rawYv,int &moveX,int &moveY) {
   }
 }
 
+void setup() {
+  Serial.begin(115200);
+  Serial.println("\n=== MiniConsole Enhanced v58 ===");
+
+  pinMode(MUX_S0, OUTPUT);
+  pinMode(JOY_SW, INPUT_PULLUP);
+  pinMode(SPEAKER_PIN, OUTPUT);
+  digitalWrite(SPEAKER_PIN, LOW);
+
+  // Initialize SPI at 8mhz for display
+  SPI.begin();
+  SPI.setFrequency(8000000);
+  
+  tft.initR(INITR_BLACKTAB);
+  tft.setRotation(1);
+  showBootScreen();
+  Serial.println("TFT initialized (8mhz SPI)");
+
+  Wire.begin(MPU_SDA, MPU_SCL);
+  Wire.setClock(400000); // Fast I2C
+  Wire.beginTransmission((uint8_t)MPU_ADDR);
+  Wire.write(0x6B);
+  Wire.write(0);
+  Wire.endTransmission();
+  Serial.println("MPU initialized");
+
+  EEPROM.begin(EEPROM_SIZE);
+  if (loadCalibration()) {
+    calibrated = true;
+    tft.setCursor(8,110); tft.setTextColor(C_FG); 
+    tft.print("Calibration loaded");
+  }
+
+  long sumX=0, sumY=0;
+  for (int i=0;i<50;i++) { sumX += readMux(0); sumY += readMux(1); delay(15); }
+  centerX = (int)(sumX / 50); centerY = (int)(sumY / 50);
+
+  connectToWiFi();
+
+  if (WiFi.status() == WL_CONNECTED) {
+    syncNTP();
+    delay(500);
+    fetchWeather();
+    weatherLastFetch = millis();
+    
+    if (MDNS.begin(DEVICE_NAME)) MDNS.addService("http","tcp",80);
+    server.on("/", handleRoot);
+    server.on("/api", handleAPI);
+    server.on("/beep", handleBeep);
+    server.on("/message", handleMessage);
+    server.begin();
+    webServerRunning = true; // mark server as running
+    Serial.println("Web server at miniconsole.local");
+  }
+
+  playClick();
+  delay(200);
+  
+  for (int i=0;i<9;i++) tttBoard[i]=0;
+  for (int i=0;i<8;i++) bullets[i].active = false;
+  for (int i=0;i<10;i++) enemies[i].active = false;
+
+  // initial wifi scan
+  scanWiFi();
+
+  needsFullRedraw = true;
+  timerMicros = micros();
+  Serial.println("Setup complete");
+}
+
+void handleCalcPressArea(int px,int py) { handleCalcPress(px,py); }
+void handleTTTPressArea(int px,int py) { handleTTTPress(px,py); }
+
+// ---------------- MAIN LOOP ----------------
 void loop() {
   static uint32_t frameCount = 0;
   static uint32_t lastFPSUpdate = 0;
@@ -1525,7 +1719,21 @@ void loop() {
           calibrateSensors();
         }
       } 
-      else if (currentApp == APP_SETTINGS) scanWiFi();
+      else if (currentApp == APP_SETTINGS) {
+        // Determine if Auto-connect button pressed (bottom-right)
+        int bx = DISP_W - 96;
+        int by = DISP_H - 22;
+        int bw = 88;
+        int bh = 16;
+        if (newCursorX >= bx && newCursorX < bx + bw && newCursorY >= by && newCursorY < by + bh) {
+          // Auto-connect pressed
+          playNavigate();
+          autoConnectToBest();
+        } else {
+          // Default: rescan networks
+          scanWiFi();
+        }
+      }
     } else {
       playClick(); playNavigate();
       currentApp = APP_HOME; needsFullRedraw = true;
@@ -1574,7 +1782,7 @@ void loop() {
     drawWebMessage();
   }
 
-  // Cursor - only redraw if moved
+  // Cursor - only redraw if moved8mhz
   if (newCursorX != cursorX || newCursorY != cursorY) {
     // Erase old cursor position
     if (lastCursorX >= 0) {
