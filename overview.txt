@@ -5,8 +5,7 @@ this is the code for a 12th standard science project
 of a "miniconsole" using a 1.8 inch TFT colour display
 along with a joystick and a mpu6050 tilt sensor to make 
 a mobile device.
-this project had multiple stupid decisions involved yet 
-does work.
+
 excess and unusable components such as an speaker amplifier
 and a unsuitable battery were used making it so that 
 the device is very bad at doing most of the things it is 
